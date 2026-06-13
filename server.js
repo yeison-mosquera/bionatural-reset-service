@@ -17,15 +17,32 @@ const pool = new Pool({
 
 // ── Migración automática al iniciar ──────────────────────────────────────────
 async function runMigrations() {
+  // Tabla password_reset_codes
   try {
-    // Agregar columna fcm_token a users si no existe
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS password_reset_codes (
+        id         SERIAL PRIMARY KEY,
+        email      TEXT NOT NULL,
+        "codeHash" TEXT NOT NULL,
+        "expiresAt" TIMESTAMPTZ NOT NULL,
+        used       BOOLEAN NOT NULL DEFAULT false,
+        "createdAt" TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Migración OK: tabla password_reset_codes verificada');
+  } catch (e) {
+    console.error('⚠️  Migración password_reset_codes:', e.message);
+  }
+
+  // Columna fcm_token en users
+  try {
     await pool.query(`
       ALTER TABLE users
       ADD COLUMN IF NOT EXISTS fcm_token TEXT
     `);
     console.log('✅ Migración OK: columna fcm_token verificada en users');
   } catch (e) {
-    console.error('⚠️  Migración:', e.message);
+    console.error('⚠️  Migración fcm_token:', e.message);
   }
 }
 
@@ -134,9 +151,104 @@ app.post('/api/notifications/register-token', async (req, res) => {
   }
 });
 
+// ── Forgot Password: genera OTP, lo guarda en DB y envía email con Brevo ─────
+app.post('/api/auth/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    return res.status(400).json({ success: false, message: 'email requerido' });
+  }
+
+  try {
+    // Verificar que el usuario existe
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1',
+      [email]
+    );
+    if (userResult.rows.length === 0) {
+      // Respuesta genérica por seguridad (no revelar si el correo existe)
+      return res.json({ success: true, message: 'Si el correo existe, recibirás un código.' });
+    }
+
+    // Generar código de 6 dígitos
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    const codeHash = await bcrypt.hash(code, 10);
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000); // 15 minutos
+
+    // Borrar códigos anteriores del mismo email
+    await pool.query('DELETE FROM password_reset_codes WHERE email = $1', [email.toLowerCase()]);
+
+    // Guardar nuevo código hasheado
+    await pool.query(
+      'INSERT INTO password_reset_codes (email, "codeHash", "expiresAt", used, "createdAt") VALUES ($1, $2, $3, false, NOW())',
+      [email.toLowerCase(), codeHash, expiresAt]
+    );
+
+    // Enviar email con Brevo
+    const brevoApiKey = process.env.BREVO_API_KEY;
+    const fromEmail   = process.env.EMAIL_FROM || 'biosoft28@gmail.com';
+    const fromName    = process.env.EMAIL_FROM_NAME || 'BioNatural';
+
+    if (!brevoApiKey) {
+      console.error('BREVO_API_KEY no configurada');
+      return res.status(500).json({ success: false, message: 'Servicio de email no configurado' });
+    }
+
+    const emailPayload = JSON.stringify({
+      sender:      { name: fromName, email: fromEmail },
+      to:          [{ email: email }],
+      subject:     'Código de recuperación - BioNatural',
+      htmlContent: `
+        <div style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:32px;background:#f8fafb;border-radius:16px;">
+          <div style="text-align:center;margin-bottom:20px;">
+            <h1 style="color:#1F7A34;margin:0;">🌿 BioNatural</h1>
+          </div>
+          <div style="background:#fff;border-radius:12px;padding:28px;">
+            <h2 style="color:#0F172A;margin-top:0;">Recupera tu contraseña</h2>
+            <p style="color:#475569;">Usa este código en la app. <strong>Expira en 15 minutos.</strong></p>
+            <div style="text-align:center;margin:24px 0;">
+              <span style="display:inline-block;background:#1F7A34;color:#fff;font-size:34px;font-weight:700;letter-spacing:10px;padding:16px 28px;border-radius:12px;">${code}</span>
+            </div>
+            <p style="color:#94A3B8;font-size:13px;text-align:center;">Si no lo solicitaste, ignora este mensaje.</p>
+          </div>
+        </div>
+      `,
+    });
+
+    await new Promise((resolve, reject) => {
+      const options = {
+        hostname: 'api.brevo.com',
+        path:     '/v3/smtp/email',
+        method:   'POST',
+        headers: {
+          'accept':       'application/json',
+          'content-type': 'application/json',
+          'api-key':      brevoApiKey,
+          'Content-Length': Buffer.byteLength(emailPayload),
+        },
+      };
+      const req2 = https.request(options, (r) => {
+        let data = '';
+        r.on('data', chunk => data += chunk);
+        r.on('end', () => {
+          if (r.statusCode >= 300) reject(new Error(`Brevo ${r.statusCode}: ${data}`));
+          else resolve(data);
+        });
+      });
+      req2.on('error', reject);
+      req2.write(emailPayload);
+      req2.end();
+    });
+
+    console.log(`✅ OTP enviado a ${email}`);
+    res.json({ success: true, message: 'Código enviado. Revisa tu bandeja de entrada.' });
+  } catch (e) {
+    console.error('forgot-password error:', e.message);
+    res.status(500).json({ success: false, message: 'No se pudo enviar el código. Intenta de nuevo.' });
+  }
+});
+
 // ── Guardar OTP hasheado en password_reset_codes ──────────────────────────────
-// Flutter llama este endpoint después de enviar el email con Brevo.
-// Estructura tabla: id, email, codeHash, expiresAt, used, createdAt
+// (Compatibilidad con clientes que llaman save-otp directamente)
 app.post('/api/auth/save-otp', async (req, res) => {
   const { email, code } = req.body;
   if (!email || !code) {

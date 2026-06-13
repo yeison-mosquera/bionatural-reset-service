@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: bionatural-reset-service
+    runtime: node
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: BREVO_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        value: biosoft28@gmail.com
+      - key: EMAIL_FROM_NAME
+        value: BioNatural
+      - key: FCM_SERVER_KEY
+        sync: false
+      - key: NODE_ENV
+        value: production
