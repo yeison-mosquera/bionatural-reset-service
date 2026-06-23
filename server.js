@@ -315,6 +315,19 @@ app.post('/api/auth/reset-password', async (req, res) => {
       return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
     }
 
+    // ── Validar que la nueva contraseña no sea igual a la actual ──────────────
+    const currentHash = userResult.rows[0].password;
+    if (currentHash) {
+      const isSamePassword = await bcrypt.compare(password, currentHash);
+      if (isSamePassword) {
+        return res.status(400).json({
+          success: false,
+          samePassword: true,
+          message: 'La nueva contraseña no puede ser igual a la contraseña actual.'
+        });
+      }
+    }
+
     // Hashear nueva contraseña
     const hashedPassword = await bcrypt.hash(password, 10);
 
