@@ -165,8 +165,9 @@ app.post('/api/auth/forgot-password', async (req, res) => {
       [email]
     );
     if (userResult.rows.length === 0) {
-      // Respuesta genérica por seguridad (no revelar si el correo existe)
-      return res.json({ success: true, message: 'Si el correo existe, recibirás un código.' });
+      // El correo no está registrado — devolvemos 200 pero con emailFound: false
+      // Flutter detecta este campo y bloquea la navegación sin revelar al usuario
+      return res.json({ success: false, emailFound: false, message: 'Si el correo está registrado, recibirás un código.' });
     }
 
     // Generar código de 6 dígitos
